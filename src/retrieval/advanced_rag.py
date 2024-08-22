@@ -132,12 +132,12 @@ class AdvancedRAGProcessor:
 用户查询: {query}
 
 请以JSON格式返回以下信息:
-{
+{{
     "complexity": "simple"|"medium"|"complex",
     "requires_code_examples": true|false,
     "is_technical": true|false,
     "recommended_strategy": "basic"|"decomposition"|"hybrid"
-}
+}}
 """
 
         # 创建LLM链分析查询
