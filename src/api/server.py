@@ -1,7 +1,7 @@
 import os
 import traceback
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -87,6 +87,7 @@ class QueryRequest(BaseModel):
     """查询请求模型"""
     question: str
     clear_history: bool = False
+    advanced_rag: Optional[bool] = True
 
 
 class ResponseItem(BaseModel):
@@ -95,6 +96,8 @@ class ResponseItem(BaseModel):
     # PyCharm错误检查
     # noinspection PyDataclass
     source_documents: List[Dict[str, Any]] = Field(default_factory=list)
+    retrieval_metadata: Dict[str, Any] = Field(default_factory=dict)
+
 
 
 @app.post("/query", response_model=ResponseItem)
@@ -116,12 +119,15 @@ async def query(request: QueryRequest):
         logger.warning("查询问题为空")
         return {
             "answer": "查询问题不能为空",
-            "source_documents": []
+            "source_documents": [],
+            "retrieval_metadata": {}
         }
 
     # 执行查询
     try:
         logger.debug("开始执行RAG查询")
+        # 设置是否使用高级RAG
+        rag_model.use_advanced_rag = request.advanced_rag
         result = rag_model.query(request.question)
         logger.debug(f"查询结果: {result.get('answer', '')[:100]}...")
 
@@ -137,7 +143,8 @@ async def query(request: QueryRequest):
 
         return {
             "answer": result["answer"],
-            "source_documents": source_docs
+            "source_documents": source_docs,
+            "retrieval_metadata": result.get("retrieval_metadata", {})
         }
     except Exception as e:
         error_msg = f"查询处理错误: {str(e)}"
