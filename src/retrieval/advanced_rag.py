@@ -7,6 +7,15 @@ from langchain.prompts import PromptTemplate
 from langchain.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field
 import json
+import logging
+import ast
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
 
 
 class StructuredQuery(BaseModel):
@@ -154,16 +163,27 @@ class AdvancedRAGProcessor:
 
         try:
             # 解析分析结果
-            analysis = json.loads(analysis_result)
-        except json.JSONDecodeError:
+            if analysis_result.startswith("```json"):
+                # 如果是JSON代码块，提取并解析JSON
+                analysis = json.loads(analysis_result[7:-3])
+            elif isinstance(analysis_result, str):
+                # 如果是字符串但不是JSON代码块，尝试用ast解析
+                analysis = ast.literal_eval(analysis_result)
+            else:
+                # 如果已经是字典对象，直接使用
+                analysis = analysis_result
+        except json.JSONDecodeError as e:
             # 解析失败时使用默认策略
             print(f"查询分析解析错误。原始输出: {analysis_result}")
+            logger.debug(e)
             analysis = {
                 "complexity": "medium",
                 "requires_code_examples": False,
                 "is_technical": True,
                 "recommended_strategy": "basic"
             }
+
+        logger.debug(f"查询分析结果: {analysis}")
 
         # 根据分析结果选择检索策略
         retrieval_metadata = {"analysis": analysis, "strategy_used": "basic"}
@@ -172,6 +192,7 @@ class AdvancedRAGProcessor:
         if analysis["recommended_strategy"] == "basic" or analysis["complexity"] == "simple":
             # 基本检索
             documents = self.base_retriever.get_relevant_documents(query, k=k)
+            logger.debug(f"检索到文档{documents}")
             retrieval_metadata["strategy_used"] = "basic"
 
         elif analysis["recommended_strategy"] == "decomposition" or analysis["complexity"] == "complex":

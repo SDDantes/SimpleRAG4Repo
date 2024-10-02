@@ -1,4 +1,5 @@
 import os
+import logging
 from typing import Dict, Any, Optional
 from langchain.llms.base import BaseLLM
 from langchain_openai import ChatOpenAI
@@ -8,6 +9,13 @@ from langchain.prompts import ChatPromptTemplate, PromptTemplate, MessagesPlaceh
 from dotenv import load_dotenv
 
 from src.retrieval.advanced_rag import AdvancedRAGProcessor
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
 
 # 加载环境变量
 load_dotenv()
@@ -113,6 +121,8 @@ class RAGModel:
 
         # 步骤2: 使用自适应检索获取相关文档
         docs, retrieval_metadata = self.advanced_rag.adaptive_retrieval(standalone_question)
+        logger.debug(f"检索到的文档: {docs}")
+        logger.debug(f"检索元数据: {retrieval_metadata}")
         self.last_retrieval_metadata = retrieval_metadata
 
         # 步骤3: 使用检索到的文档回答问题

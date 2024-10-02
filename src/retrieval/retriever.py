@@ -17,7 +17,9 @@ class EnhancedRetriever:
 
         # 如果没有提供LLM，使用默认的ChatOpenAI
         if llm is None:
-            self.llm = ChatOpenAI(temperature=0)
+            self.llm = ChatOpenAI(
+                model_name="gpt-4o-mini",
+                temperature=0.2)
         else:
             self.llm = llm
 
