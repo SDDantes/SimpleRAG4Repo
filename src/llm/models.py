@@ -7,8 +7,11 @@ from langchain.chains import ConversationalRetrievalChain, LLMChain
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import ChatPromptTemplate, PromptTemplate, MessagesPlaceholder
 from dotenv import load_dotenv
+import time
 
 from src.retrieval.advanced_rag import AdvancedRAGProcessor
+from src.utils.performance import timed, global_timing_stats
+
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -68,6 +71,9 @@ class RAGModel:
         # 存储最近一次的查询元数据
         self.last_retrieval_metadata = {}
 
+        # 性能统计
+        self.timing_stats = global_timing_stats
+
     def _create_qa_chain(self) -> ConversationalRetrievalChain:
         """创建问答链"""
         # 创建自定义提示模板以更好地处理代码和技术文档
@@ -101,35 +107,42 @@ class RAGModel:
             chain_type="stuff"  # 明确指定链类型
         )
 
+    @timed("rag_query", stats_instance=global_timing_stats)
     def query(self, question: str) -> Dict[str, Any]:
         """查询RAG模型"""
+        # 重置性能统计
+        self.timing_stats.reset()
+        query_start_time = time.time()
+
         if not self.use_advanced_rag:
             # 使用标准RAG流程
-            return self.qa_chain.invoke({"question": question})
+            with self.timing_stats.measure("standard_rag_flow"):
+                return self.qa_chain.invoke({"question": question})
 
         # 使用高级RAG流程
         # 步骤1: 将历史对话和当前问题结合，生成独立查询
-        if len(self.memory.chat_memory.messages) > 0:
-            # 使用记忆中的历史和当前问题生成独立查询
-            history = self.memory.load_memory_variables({})
-            standalone_question = self._get_standalone_question(
-                history[self.memory_key],
-                question
-            )
-        else:
-            standalone_question = question
+        with self.timing_stats.measure("generate_standalone_question"):
+            if len(self.memory.chat_memory.messages) > 0:
+                # 使用记忆中的历史和当前问题生成独立查询
+                history = self.memory.load_memory_variables({})
+                standalone_question = self._get_standalone_question(
+                    history[self.memory_key],
+                    question
+                )
+            else:
+                standalone_question = question
 
         # 步骤2: 使用自适应检索获取相关文档
-        docs, retrieval_metadata = self.advanced_rag.adaptive_retrieval(standalone_question)
-        logger.debug(f"检索到的文档: {docs}")
-        logger.debug(f"检索元数据: {retrieval_metadata}")
-        self.last_retrieval_metadata = retrieval_metadata
+        with self.timing_stats.measure("adaptive_retrieval"):
+            docs, retrieval_metadata = self.advanced_rag.adaptive_retrieval(standalone_question)
+            self.last_retrieval_metadata = retrieval_metadata
 
         # 步骤3: 使用检索到的文档回答问题
-        result = self.qa_chain.combine_docs_chain.invoke({
-            "input_documents": docs,
-            "question": question
-        })
+        with self.timing_stats.measure("answer_generation"):
+            result = self.qa_chain.combine_docs_chain.invoke({
+                "input_documents": docs,
+                "question": question
+            })
 
         # 构造返回结果
         response = {
@@ -141,11 +154,24 @@ class RAGModel:
             response["source_documents"] = docs
 
         # 更新对话历史
-        self.memory.chat_memory.add_user_message(question)
-        self.memory.chat_memory.add_ai_message(result["output_text"])
+        with self.timing_stats.measure("update_memory"):
+            self.memory.chat_memory.add_user_message(question)
+            self.memory.chat_memory.add_ai_message(result["output_text"])
 
         # 添加高级RAG元数据
         response["retrieval_metadata"] = retrieval_metadata
+
+        # 计算总查询时间并添加到响应
+        query_total_time = time.time() - query_start_time
+
+        # 添加性能统计到响应
+        response["performance"] = {
+            "total_query_time": query_total_time,
+            **self.timing_stats.get_summary()
+        }
+
+        # 记录性能统计
+        self.timing_stats.log_stats(logging.INFO)
 
         return response
 
@@ -175,3 +201,4 @@ class RAGModel:
         """清除对话历史"""
         self.memory.clear()
         self.last_retrieval_metadata = {}
+        self.timing_stats.reset()

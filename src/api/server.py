@@ -97,6 +97,7 @@ class ResponseItem(BaseModel):
     # noinspection PyDataclass
     source_documents: List[Dict[str, Any]] = Field(default_factory=list)
     retrieval_metadata: Dict[str, Any] = Field(default_factory=dict)
+    performance: Dict[str, float] = Field(default_factory=dict, description="性能统计数据")
 
 
 
@@ -144,7 +145,8 @@ async def query(request: QueryRequest):
         return {
             "answer": result["answer"],
             "source_documents": source_docs,
-            "retrieval_metadata": result.get("retrieval_metadata", {})
+            "retrieval_metadata": result.get("retrieval_metadata", {}),
+            "performance": result.get("performance", {})
         }
     except Exception as e:
         error_msg = f"查询处理错误: {str(e)}"

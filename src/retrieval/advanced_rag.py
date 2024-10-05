@@ -4,158 +4,95 @@ from langchain.llms.base import BaseLLM
 from langchain_openai import ChatOpenAI
 from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
-from langchain.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field
 import json
 import logging
 import ast
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler()]
-)
+from src.utils.performance import timed, global_timing_stats
+# 导入策略注册表，不再需要导入具体的查询处理功能
+from src.retrieval.retrieval_strategies import StrategyRegistry
+# 导入查询处理器，用于自己需要的查询处理
+from src.retrieval.query_processors import QueryProcessors
+
 logger = logging.getLogger(__name__)
 
 
-class StructuredQuery(BaseModel):
-    """用于解析的结构化查询"""
-    rewritten_query: str = Field(description="重写后更清晰、更详细的查询")
-
-
-class QuerySubquestions(BaseModel):
-    """用于解析的查询子问题列表"""
-    subquestions: List[str] = Field(description="原始查询的子问题列表")
+class QueryAnalysis(BaseModel):
+    """查询分析结果"""
+    complexity: str = Field(description="查询复杂度: simple, medium, complex")
+    requires_code_examples: bool = Field(description="查询是否需要代码示例")
+    is_technical: bool = Field(description="是否是技术性查询")
+    recommended_strategy: str = Field(description="推荐的检索策略")
+    explanation: str = Field(description="策略选择的解释")
 
 
 class AdvancedRAGProcessor:
-    """高级RAG处理器，提供查询重写、分解和自适应检索功能"""
+    """高级RAG处理器，提供查询分析和自适应检索功能"""
 
     def __init__(self, llm: Optional[BaseLLM] = None, base_retriever: Optional[BaseRetriever] = None):
         """初始化高级RAG处理器"""
         # 如果未提供LLM，使用默认的OpenAI模型
         if llm is None:
-            self.llm = ChatOpenAI(temperature=0, model="gpt-4o-mini")
+            self.llm = ChatOpenAI(temperature=0, model_name="gpt-4o-mini")
         else:
             self.llm = llm
 
         self.base_retriever = base_retriever
 
+    # 这些方法现在是从QueryProcessors调用的，保留这些公共方法作为兼容接口
     def query_rewrite(self, original_query: str) -> str:
-        """
-        查询重写功能：将原始查询重写为更适合检索的形式
-        """
-        # 创建Pydantic解析器
-        parser = PydanticOutputParser(pydantic_object=StructuredQuery)
-
-        # 创建查询重写提示模板
-        query_rewrite_template = PromptTemplate(
-            template="""你是一个专业的查询优化器。你的任务是将用户的原始查询重写为更详细、更准确的查询，
-以便更好地从公司的技术文档和代码仓库中检索相关信息。
-
-原始查询: {original_query}
-
-重写时考虑：
-1. 增加技术术语和专业词汇
-2. 更详细地阐述查询意图
-3. 结构化表达，使查询更清晰
-4. 保持查询的本质含义不变
-
-{format_instructions}
-""",
-            input_variables=["original_query"],
-            partial_variables={"format_instructions": parser.get_format_instructions()}
-        )
-
-        # 创建LLM链
-        query_rewrite_chain = LLMChain(llm=self.llm, prompt=query_rewrite_template)
-
-        # 执行查询重写
-        result = query_rewrite_chain.run(original_query=original_query)
-
-        try:
-            # 解析结果
-            parsed_result = parser.parse(result)
-            return parsed_result.rewritten_query
-        except Exception as e:
-            # 解析失败时回退到原始查询
-            print(f"查询重写解析错误: {str(e)}")
-            print(f"原始LLM输出: {result}")
-            return original_query
+        """查询重写功能（保留兼容性）"""
+        return QueryProcessors.rewrite_query(original_query, llm=self.llm)
 
     def query_decomposition(self, original_query: str, max_subquestions: int = 3) -> List[str]:
+        """查询分解功能（保留兼容性）"""
+        return QueryProcessors.decompose_query(original_query, max_subquestions, llm=self.llm)
+
+    @timed("analyze_query", stats_instance=global_timing_stats)
+    def analyze_query(self, query: str) -> Dict[str, Any]:
         """
-        查询分解功能：将复杂查询分解为多个简单子查询
+        分析查询特性，推荐最佳检索策略
         """
-        # 创建Pydantic解析器
-        parser = PydanticOutputParser(pydantic_object=QuerySubquestions)
+        # 获取可用策略列表
+        available_strategies = StrategyRegistry.get_strategy_names()
+        strategies_str = ", ".join(available_strategies)
 
-        # 创建查询分解提示模板
-        query_decomp_template = PromptTemplate(
-            template="""你是一个专业的查询分析器。你的任务是将复杂的用户查询分解为多个简单的子查询，
-以便更全面地从公司的技术文档和代码仓库中检索相关信息。
-
-原始查询: {original_query}
-
-如果原始查询已经足够简单，可以返回一个只包含原始查询的列表。
-否则，将其分解为不超过{max_subquestions}个子查询。
-
-分解时考虑：
-1. 每个子查询应关注原始查询的一个具体方面
-2. 子查询应该相互补充，共同覆盖原始查询的全部含义
-3. 每个子查询应该清晰、具体，便于检索
-
-{format_instructions}
-""",
-            input_variables=["original_query", "max_subquestions"],
-            partial_variables={"format_instructions": parser.get_format_instructions()}
-        )
-
-        # 创建LLM链
-        query_decomp_chain = LLMChain(llm=self.llm, prompt=query_decomp_template)
-
-        # 执行查询分解
-        result = query_decomp_chain.run(original_query=original_query, max_subquestions=max_subquestions)
-
-        try:
-            # 解析结果
-            parsed_result = parser.parse(result)
-            return parsed_result.subquestions
-        except Exception as e:
-            # 解析失败时回退到原始查询
-            print(f"查询分解解析错误: {str(e)}")
-            print(f"原始LLM输出: {result}")
-            return [original_query]
-
-    def adaptive_retrieval(self, query: str, k: int = 5) -> Tuple[List[Document], Dict[str, Any]]:
-        """
-        自适应检索增强：根据查询特性选择最合适的检索策略
-        返回: (检索到的文档列表, 检索元数据)
-        """
-        if self.base_retriever is None:
-            raise ValueError("需要base_retriever来执行检索")
-
-        # 分析查询复杂度的提示模板
-        query_analysis_template = """分析以下用户查询的特性:
+        # 创建查询分析提示模板
+        query_analysis_template = PromptTemplate(
+            template="""分析以下用户查询的特性，并推荐最佳检索策略:
 
 用户查询: {query}
+
+可用的检索策略:
+{strategies}
 
 请以JSON格式返回以下信息:
 {{
     "complexity": "simple"|"medium"|"complex",
     "requires_code_examples": true|false,
     "is_technical": true|false,
-    "recommended_strategy": "basic"|"decomposition"|"hybrid"
+    "recommended_strategy": "{strategy_options}",
+    "explanation": "策略选择的简短解释"
 }}
-"""
+
+策略选择指南:
+- basic: 适用于简单、直接的查询
+- query_rewrite: 适用于需要澄清、扩展的查询
+- decomposition: 适用于复杂的、多方面、宽泛的或者多步骤查询
+- hyde: 适用于需要详细技术解释或代码示例的查询
+""",
+            input_variables=["query"],
+            partial_variables={
+                "strategies": strategies_str,
+                "strategy_options": "|".join(available_strategies)
+            }
+        )
 
         # 创建LLM链分析查询
         analysis_chain = LLMChain(
             llm=self.llm,
-            prompt=PromptTemplate(
-                template=query_analysis_template,
-                input_variables=["query"]
-            )
+            prompt=query_analysis_template
         )
 
         # 执行查询分析
@@ -172,58 +109,68 @@ class AdvancedRAGProcessor:
             else:
                 # 如果已经是字典对象，直接使用
                 analysis = analysis_result
-        except json.JSONDecodeError as e:
+
+            # 验证推荐的策略是否可用
+            if analysis["recommended_strategy"] not in available_strategies:
+                logger.warning(f"推荐的策略 {analysis['recommended_strategy']} 不可用，回退到basic")
+                analysis["recommended_strategy"] = "basic"
+                analysis["explanation"] += " (原推荐策略不可用，回退到basic)"
+
+            return analysis
+        except (json.JSONDecodeError, SyntaxError, ValueError):
             # 解析失败时使用默认策略
-            print(f"查询分析解析错误。原始输出: {analysis_result}")
-            logger.debug(e)
-            analysis = {
+            logger.warning(f"查询分析解析错误。原始输出: {analysis_result}")
+            return {
                 "complexity": "medium",
                 "requires_code_examples": False,
                 "is_technical": True,
-                "recommended_strategy": "basic"
+                "recommended_strategy": "basic",
+                "explanation": "解析失败，使用默认策略"
             }
 
-        logger.debug(f"查询分析结果: {analysis}")
+    @timed("adaptive_retrieval", stats_instance=global_timing_stats)
+    def adaptive_retrieval(self, query: str, k: int = 5) -> Tuple[List[Document], Dict[str, Any]]:
+        """
+        自适应检索增强：根据查询特性选择最合适的检索策略
+        返回: (检索到的文档列表, 检索元数据)
+        """
+        if self.base_retriever is None:
+            raise ValueError("需要base_retriever来执行检索")
 
-        # 根据分析结果选择检索策略
-        retrieval_metadata = {"analysis": analysis, "strategy_used": "basic"}
-        documents = []
+        # 分析查询，选择最佳策略
+        analysis = self.analyze_query(query)
 
-        if analysis["recommended_strategy"] == "basic" or analysis["complexity"] == "simple":
-            # 基本检索
-            documents = self.base_retriever.get_relevant_documents(query, k=k)
-            logger.debug(f"检索到文档{documents}")
-            retrieval_metadata["strategy_used"] = "basic"
+        # 获取推荐的策略
+        strategy_name = analysis["recommended_strategy"]
 
-        elif analysis["recommended_strategy"] == "decomposition" or analysis["complexity"] == "complex":
-            # 分解查询并检索
-            subquestions = self.query_decomposition(query)
-            all_docs = []
+        # 创建策略实例
+        try:
+            strategy = StrategyRegistry.get_strategy(
+                name=strategy_name,
+                retriever=self.base_retriever,
+                llm=self.llm
+            )
+        except ValueError:
+            logger.warning(f"策略 {strategy_name} 不可用，回退到basic")
+            strategy = StrategyRegistry.get_strategy(
+                name="basic",
+                retriever=self.base_retriever,
+                llm=self.llm
+            )
+            analysis["recommended_strategy"] = "basic"
+            analysis["explanation"] += " (原推荐策略不可用，回退到basic)"
 
-            for subq in subquestions:
-                # 对每个子查询重写并检索
-                rewritten_subq = self.query_rewrite(subq)
-                docs = self.base_retriever.get_relevant_documents(rewritten_subq, k=max(2, k // len(subquestions)))
-                all_docs.extend(docs)
+        # 使用选定的策略执行检索
+        documents, strategy_metadata = strategy.retrieve(query, k=k)
 
-            # 去重
-            seen_contents = set()
-            documents = []
-            for doc in all_docs:
-                if doc.page_content not in seen_contents:
-                    seen_contents.add(doc.page_content)
-                    documents.append(doc)
+        # 合并所有元数据
+        retrieval_metadata = {
+            "analysis": analysis,
+            "strategy_used": strategy_name,
+            **strategy_metadata
+        }
 
-            # 如果需要，限制文档数量
-            documents = documents[:k]
-            retrieval_metadata["strategy_used"] = "decomposition"
-            retrieval_metadata["subquestions"] = subquestions
-
-        else:  # hybrid or fallback
-            # 混合策略: 重写查询并检索
-            rewritten_query = self.query_rewrite(query)
-            documents = self.base_retriever.get_relevant_documents(rewritten_query, k=k)
-            retrieval_metadata["strategy_used"] = "hybrid"
-            retrieval_metadata["rewritten_query"] = rewritten_query
+        # 记录性能统计
+        retrieval_metadata["performance"] = global_timing_stats.get_summary()
 
         return documents, retrieval_metadata
